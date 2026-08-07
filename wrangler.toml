@@ -1,0 +1,8 @@
+name = "kiwibot"
+main = "src/worker.js"
+compatibility_date = "2026-08-07"
+
+[vars]
+BOT_TOKEN = "8878135109:AAGfF679A-zFsW8sunqXIlJazU0LYH7SW2Q"
+SUPABASE_URL = "https://shylzcegyexfwbqytdva.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoeWx6Y2VneWV4ZndicXl0ZHZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYxMDE0MzksImV4cCI6MjEwMTY3NzQzOX0.BiUDS0cV08cyDUcNKKoDbla4fSVcL0EtfsNIidX4a3Q"
