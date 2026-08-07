@@ -1,9 +1,15 @@
 {
-  "name": "kiwibot-worker",
+  "name": "kiwibot",
   "version": "1.0.0",
-  "private": true,
+  "description": "Telegram bot running on Cloudflare Workers",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "check": "node --check src/worker.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
   }
 }
