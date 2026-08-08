@@ -1,21 +1,43 @@
 import { QUIZ_QUESTIONS, QUESTION_COUNT } from './questions.js';
 
-const BOT_TOKEN = "8878135109:AAGfF679A-zFsW8sunqXIlJazU0LYH7SW2Q";
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-const OWNER_ID = 123456789;
+const ROOT_ADMIN_ID = 7224762410;
+let TELEGRAM_API;
 const DEFAULT_TIMER = 15;
 const DEFAULT_QUESTION_COUNT = QUESTION_COUNT;
 
-const ROLE = { OWNER: 'OWNER', HOST: 'HOST', PARTICIPANT: 'PARTICIPANT' };
+const ROLE = { ROOT: 'ROOT', OWNER: 'OWNER', HOST: 'HOST', PARTICIPANT: 'PARTICIPANT' };
 const VERIFICATION_STATUS = { PENDING: 'PENDING', VERIFIED: 'VERIFIED', REJECTED: 'REJECTED', REVOKED: 'REVOKED' };
 const QUIZ_STATE = { INACTIVE: 'INACTIVE', ACTIVE: 'ACTIVE', PAUSED: 'PAUSED', ENDED: 'ENDED' };
 
-const hosts = new Set([OWNER_ID]);
+const hosts = new Set([ROOT_ADMIN_ID]);
 const quizSessions = new Map();
 const participantRecords = new Map();
 const globalScores = new Map();
 const cleanupLog = [];
+
+function isRootAdmin(userId) {
+  return userId === ROOT_ADMIN_ID;
+}
+
+function isAuthorizedHost(userId) {
+  if (isRootAdmin(userId)) return true;
+  return hosts.has(userId);
+}
+
+function getUserRole(userId) {
+  if (isRootAdmin(userId)) return ROLE.ROOT;
+  if (hosts.has(userId)) return ROLE.HOST;
+  const record = participantRecords.get(userId);
+  if (record && record.verificationStatus === VERIFICATION_STATUS.VERIFIED) return ROLE.PARTICIPANT;
+  return null;
+}
+
+function isAuthorized(userId, minRole) {
+  const role = getUserRole(userId);
+  if (!role) return false;
+  const rank = { [ROLE.PARTICIPANT]: 1, [ROLE.HOST]: 2, [ROLE.OWNER]: 3, [ROLE.ROOT]: 4 };
+  return rank[role] >= rank[minRole];
+}
 
 function normalizeAnswer(text) {
   return text
@@ -33,21 +55,6 @@ function checkAnswer(normalizedAnswer, question) {
     if (normalizedAnswer === normalizeAnswer(accepted)) return true;
   }
   return false;
-}
-
-function getUserRole(userId) {
-  if (userId === OWNER_ID) return ROLE.OWNER;
-  if (hosts.has(userId)) return ROLE.HOST;
-  const record = participantRecords.get(userId);
-  if (record && record.verificationStatus === VERIFICATION_STATUS.VERIFIED) return ROLE.PARTICIPANT;
-  return null;
-}
-
-function isAuthorized(userId, minRole) {
-  const role = getUserRole(userId);
-  if (!role) return false;
-  const rank = { [ROLE.PARTICIPANT]: 1, [ROLE.HOST]: 2, [ROLE.OWNER]: 3 };
-  return rank[role] >= rank[minRole];
 }
 
 function formatDisplayName(user) {
@@ -165,7 +172,7 @@ async function handleAnswer(chatId, userId, displayName, username, text) {
 
   if (!session.participantIds.includes(userId)) {
     const role = getUserRole(userId);
-    if (role !== ROLE.HOST && role !== ROLE.OWNER) return;
+    if (role !== ROLE.HOST && role !== ROLE.OWNER && role !== ROLE.ROOT) return;
   }
 
   const questionStartTime = session.questionStartTime;
@@ -291,7 +298,7 @@ async function cleanupQuiz(chatId, session) {
 
 async function sendStartMenu(chatId, userName) {
   await sendMessage(chatId,
-    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/quiz — Host: start a quiz\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n\nHost: use /quiz [question_count] [timer_seconds]\nExample: /quiz 10 30`,
+    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/startquiz — Host: start a quiz\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n\nHost: /startquiz [question_count] [timer_seconds]\nExample: /startquiz 10 30`,
     {
       reply_markup: {
         keyboard: [
@@ -307,21 +314,26 @@ async function sendStartMenu(chatId, userName) {
 async function sendHelp(chatId) {
   await sendMessage(chatId,
     `<b>📚 Kiwi Quiz Bot — Help</b>\n\n` +
-    `<b>Host Commands:</b>\n` +
-    `/quiz [count] [timer] — Start a new quiz (host only)\n` +
-    `/next — Advance to next question (host only)\n` +
-    `/pause — Pause the current question (host only)\n` +
-    `/resume — Resume the current question (host only)\n` +
-    `/endquiz — End the quiz early (host only)\n` +
-    `/verify [user_id] — Approve a participant (host only)\n` +
-    `/addhost [user_id] — Add a host (owner only)\n` +
-    `/removehost [user_id] — Remove a host (owner only)\n\n` +
+    `<b>CEO / Host Commands:</b>\n` +
+    `/startquiz [count] [timer] — Start a quiz (host+)\n` +
+    `/quiz [count] [timer] — Alias for /startquiz\n` +
+    `/stopquiz — End the quiz (host+)\n` +
+    `/next — Advance to next question (host+)\n` +
+    `/pausequiz — Pause timer (host+)\n` +
+    `/resumequiz — Resume timer (host+)\n` +
+    `/status — Show quiz status (host+)\n` +
+    `/resetquiz — Reset quiz session (CEO only)\n` +
+    `/hosts — List authorized hosts (host+)\n` +
+    `/verify [user_id] — Approve a participant (host+)\n` +
+    `/addhost [user_id] — Add a host (CEO only)\n` +
+    `/removehost [user_id] — Remove a host (CEO only)\n\n` +
     `<b>Participant Commands:</b>\n` +
-    `/quiz — Check if a quiz is running\n` +
     `/score — View your score\n` +
-    `/leaderboard — View top performers\n\n` +
+    `/leaderboard — View top performers\n` +
+    `/scores — Alias for /leaderboard\n\n` +
     `<b>Answering:</b>\n` +
-    `During a quiz, simply type your answer in the group chat!`
+    `During a quiz, simply type your answer in the group chat!\n\n` +
+    `<b>CEO:</b> 7224762410 has full authorization.`
   );
 }
 
@@ -388,13 +400,17 @@ async function sendPending(chatId, userId, displayName, userName) {
 
 async function handleStartCommand(chatId, userId, firstName, lastName, username) {
   const role = getUserRole(userId);
+  if (isRootAdmin(userId)) {
+    console.log(`ROOT ADMIN AUTHORIZED | userId=${userId}`);
+  }
   const displayName = formatDisplayName({ first_name: firstName, last_name: lastName, username });
   await sendStartMenu(chatId, displayName);
 }
 
 async function handleQuizCommand(chatId, userId, firstName, lastName, username, args, ctx) {
   const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/quiz`);
     const displayName = formatDisplayName({ first_name: firstName, last_name: lastName, username });
     const session = quizSessions.get(chatId);
     if (session && session.state === QUIZ_STATE.ACTIVE) {
@@ -415,14 +431,18 @@ async function handleQuizCommand(chatId, userId, firstName, lastName, username, 
 
   const session = createQuizSession(chatId, userId, questionCount, timerSeconds);
 
+  if (isRootAdmin(userId)) {
+    console.log(`ROOT ADMIN AUTHORIZED | userId=${userId} command=/quiz`);
+  }
+
   await sendMessage(chatId, `🚀 <b>Quiz Starting!</b>\n\n${questionCount} questions | ⏱️ ${timerSeconds}s per question\n\nParticipants: please wait for questions.`);
 
   await publishQuestion(chatId, session);
 }
 
 async function handleNextCommand(chatId, userId) {
-  const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/next`);
     await sendMessage(chatId, `⚠️ Only hosts can advance to the next question.`);
     return;
   }
@@ -440,8 +460,8 @@ async function handleNextCommand(chatId, userId) {
 }
 
 async function handlePauseCommand(chatId, userId) {
-  const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/pause`);
     await sendMessage(chatId, `⚠️ Only hosts can pause the quiz.`);
     return;
   }
@@ -464,8 +484,8 @@ async function handlePauseCommand(chatId, userId) {
 }
 
 async function handleResumeCommand(chatId, userId) {
-  const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/resume`);
     await sendMessage(chatId, `⚠️ Only hosts can resume the quiz.`);
     return;
   }
@@ -498,8 +518,8 @@ async function handleResumeCommand(chatId, userId) {
 }
 
 async function handleEndQuizCommand(chatId, userId) {
-  const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/endquiz`);
     await sendMessage(chatId, `⚠️ Only hosts can end the quiz.`);
     return;
   }
@@ -518,8 +538,8 @@ async function handleEndQuizCommand(chatId, userId) {
 }
 
 async function handleVerifyCommand(chatId, userId, args) {
-  const role = getUserRole(userId);
-  if (!isAuthorized(userId, ROLE.HOST)) {
+  if (!isAuthorizedHost(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/verify`);
     await sendMessage(chatId, `⚠️ Only hosts can verify participants.`);
     return;
   }
@@ -559,8 +579,9 @@ async function handleVerifyCommand(chatId, userId, args) {
 }
 
 async function handleAddHostCommand(chatId, userId, args) {
-  if (userId !== OWNER_ID) {
-    await sendMessage(chatId, `⚠️ Only the owner can add hosts.`);
+  if (!isRootAdmin(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/addhost`);
+    await sendMessage(chatId, `❌ You are not authorized to perform this action.`);
     return;
   }
 
@@ -570,18 +591,25 @@ async function handleAddHostCommand(chatId, userId, args) {
     return;
   }
 
+  if (targetId === ROOT_ADMIN_ID) {
+    await sendMessage(chatId, `👑 This user is already the CEO.`);
+    return;
+  }
+
   if (hosts.has(targetId)) {
-    await sendMessage(chatId, `⚠️ User ${targetId} is already a host.`);
+    await sendMessage(chatId, `⚠️ User ${targetId} is already an authorized host.`);
     return;
   }
 
   hosts.add(targetId);
-  await sendMessage(chatId, `✅ User ${targetId} has been added as a host.`);
+  console.log(`HOST AUTHORIZED | userId=${targetId} authorizedBy=${userId}`);
+  await sendMessage(chatId, `✅ Host authorized.`);
 }
 
 async function handleRemoveHostCommand(chatId, userId, args) {
-  if (userId !== OWNER_ID) {
-    await sendMessage(chatId, `⚠️ Only the owner can remove hosts.`);
+  if (!isRootAdmin(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/removehost`);
+    await sendMessage(chatId, `❌ You are not authorized to perform this action.`);
     return;
   }
 
@@ -591,16 +619,94 @@ async function handleRemoveHostCommand(chatId, userId, args) {
     return;
   }
 
-  if (targetId === OWNER_ID) {
-    await sendMessage(chatId, `⚠️ Cannot remove the owner.`);
+  if (targetId === ROOT_ADMIN_ID) {
+    await sendMessage(chatId, `❌ The CEO cannot be removed.`);
     return;
   }
 
   if (hosts.delete(targetId)) {
-    await sendMessage(chatId, `✅ User ${targetId} has been removed as a host.`);
+    console.log(`HOST REMOVED | userId=${targetId} removedBy=${userId}`);
+    await sendMessage(chatId, `✅ Host authorization removed.`);
   } else {
-    await sendMessage(chatId, `⚠️ User ${targetId} is not a host.`);
+    await sendMessage(chatId, `⚠️ User ${targetId} is not an authorized host.`);
   }
+}
+
+async function handleHostsCommand(chatId, userId) {
+  if (!isAuthorized(userId, ROLE.HOST)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/hosts`);
+    await sendMessage(chatId, `❌ You are not authorized to perform this action.`);
+    return;
+  }
+
+  let msg = `👑 <b>Authorization Hierarchy</b>\n\n`;
+  if (isRootAdmin(userId)) {
+    msg += `👑 <b>CEO:</b> ${ROOT_ADMIN_ID}\n`;
+  }
+  msg += `\n👑 <b>Authorized Hosts:</b>\n`;
+  const hostList = Array.from(hosts).filter(id => id !== ROOT_ADMIN_ID);
+  if (hostList.length === 0) {
+    msg += `  None yet.\n`;
+  } else {
+    hostList.forEach(id => {
+      msg += `  • ${id}\n`;
+    });
+  }
+  await sendMessage(chatId, msg);
+}
+
+async function handleStatusCommand(chatId, userId) {
+  if (!isAuthorized(userId, ROLE.HOST)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/status`);
+    await sendMessage(chatId, `❌ You are not authorized to perform this action.`);
+    return;
+  }
+
+  const session = quizSessions.get(chatId);
+  if (!session) {
+    await sendMessage(chatId, `📋 <b>Quiz Status:</b>\n\nNo active quiz in this group.\nUse /quiz or /startquiz to begin.`);
+    return;
+  }
+
+  const q = QUIZ_QUESTIONS[session.currentQuestion];
+  let msg = `📊 <b>Quiz Status</b>\n\n`;
+  msg += `Quiz ID: ${session.quizId}\n`;
+  msg += `State: ${session.state}\n`;
+  msg += `Question: ${session.currentQuestion + 1}/${session.questionCount}`;
+  if (q) msg += ` — ${q.question}`;
+  msg += `\n\nParticipants: ${session.participantIds.length}\n`;
+  msg += `Scores recorded: ${session.scores.size}`;
+
+  if (session.questionStartTime && session.state === QUIZ_STATE.ACTIVE) {
+    const elapsed = Date.now() - session.questionStartTime;
+    const remaining = Math.max(0, session.timerSeconds - Math.floor(elapsed / 1000));
+    msg += `\n\n⏱️ Time remaining: ${remaining}s`;
+  }
+
+  await sendMessage(chatId, msg);
+}
+
+async function handleResetQuizCommand(chatId, userId) {
+  if (!isRootAdmin(userId)) {
+    console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/resetquiz`);
+    await sendMessage(chatId, `❌ You are not authorized to perform this action.`);
+    return;
+  }
+
+  const session = quizSessions.get(chatId);
+  if (!session) {
+    await sendMessage(chatId, `⚠️ No active quiz to reset.`);
+    return;
+  }
+
+  if (session.timerId) clearTimeout(session.timerId);
+  quizSessions.delete(chatId);
+  session.participantIds.forEach(pid => {
+    participantRecords.delete(pid);
+  });
+
+  console.log(`QUIZ RESET | quizId=${session.quizId} resetBy=${userId}`);
+  await sendMessage(chatId, `🔄 <b>Quiz session reset.</b>\n\nAll quiz data cleared. Use /quiz to start fresh.`);
 }
 
 async function handleAnswerSubmission(chatId, userId, firstName, lastName, username, text) {
@@ -609,7 +715,7 @@ async function handleAnswerSubmission(chatId, userId, firstName, lastName, usern
 
   const role = getUserRole(userId);
 
-  if (role === ROLE.HOST || role === ROLE.OWNER) return;
+  if (role === ROLE.HOST || role === ROLE.OWNER || role === ROLE.ROOT) return;
 
   if (role === null) {
     if (!participantRecords.has(userId)) {
@@ -708,6 +814,27 @@ async function handleMessage(message, ctx) {
         }
         await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx);
         break;
+      case 'stopquiz':
+        await handleEndQuizCommand(chatId, userId);
+        break;
+      case 'pausequiz':
+        await handlePauseCommand(chatId, userId);
+        break;
+      case 'resumequiz':
+        await handleResumeCommand(chatId, userId);
+        break;
+      case 'status':
+        await handleStatusCommand(chatId, userId);
+        break;
+      case 'scores':
+        await sendLeaderboard(chatId);
+        break;
+      case 'resetquiz':
+        await handleResetQuizCommand(chatId, userId);
+        break;
+      case 'hosts':
+        await handleHostsCommand(chatId, userId);
+        break;
       default:
         await sendMessage(chatId, `❓ Unknown command. Try /help`);
     }
@@ -765,6 +892,13 @@ async function handleCallbackQuery(callback, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
+    if (!TELEGRAM_API) {
+      TELEGRAM_API = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
+      if (env.ROOT_ADMIN_ID) {
+        // ROOT_ADMIN_ID is set from env if available (wrangler.toml var)
+      }
+    }
+
     if (request.method === 'GET') {
       return new Response('✅ Kiwi Bot is running!', { status: 200 });
     }

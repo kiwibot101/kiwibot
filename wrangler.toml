@@ -1,3 +1,6 @@
 name = "kiwibot"
 main = "src/index.js"
 compatibility_date = "2026-08-07"
+
+[vars]
+ROOT_ADMIN_ID = "7224762410"
