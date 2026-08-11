@@ -1235,9 +1235,13 @@ async function handleMessage(message, ctx, env) {
       case 'endquiz':
         await handleEndQuizCommand(chatId, userId);
         break;
-      case 'verify':
-        await handleVerifyCommand(chatId, userId, args);
-        break;
+       case 'verify':
+         if (args.length > 0) {
+           await handleVerifyCommand(chatId, userId, args);
+         } else {
+           await handleVerifyMembership(chatId, userId, env);
+         }
+         break;
       case 'addhost':
         await handleAddHostCommand(chatId, userId, args);
         break;
@@ -1269,13 +1273,10 @@ async function handleMessage(message, ctx, env) {
        case 'status':
          await handleStatusCommand(chatId, userId);
          break;
-       case 'join':
-         await handleJoinCommand(chatId, userId, env);
-         break;
-       case 'verify':
-         await handleVerifyMembership(chatId, userId, env);
-         break;
-       case 'referrals':
+        case 'join':
+          await handleJoinCommand(chatId, userId, env);
+          break;
+        case 'referrals':
          await handleReferralsCommand(chatId, userId, env);
          break;
        case 'stats':

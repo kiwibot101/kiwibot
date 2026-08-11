@@ -14,4 +14,4 @@ class_name = "KiwiState"
 
 [[migrations]]
 tag = "v1"
-new_classes = [ "KiwiState" ]
+new_sqlite_classes = [ "KiwiState" ]
