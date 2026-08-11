@@ -1,7 +1,9 @@
 import { QUIZ_QUESTIONS, QUESTION_COUNT } from './questions.js';
+import { KiwiState, ELIGIBILITY, REFERRAL_STATUS } from './kiwi-state.js';
 
 const ROOT_ADMIN_ID = 7224762410;
 let TELEGRAM_API;
+const BOT_USERNAME = 'kiwi010_bot';
 const DEFAULT_TIMER = 15;
 const DEFAULT_QUESTION_COUNT = QUESTION_COUNT;
 
@@ -14,6 +16,79 @@ const quizSessions = new Map();
 const participantRecords = new Map();
 const globalScores = new Map();
 const cleanupLog = [];
+
+let _kiwiStateEnv = null;
+
+function setKiwiStateEnv(env) {
+  _kiwiStateEnv = env;
+}
+
+async function callKiwiState(action, data = {}) {
+  if (!_kiwiStateEnv) {
+    console.error('KiwiState: env not initialized');
+    return { error: 'State not initialized' };
+  }
+  if (!_kiwiStateEnv.KIWI_STATE) {
+    console.error('KiwiState: KIWI_STATE binding not found');
+    return { error: 'State binding not found' };
+  }
+  try {
+    const id = _kiwiStateEnv.KIWI_STATE.idFromName('kiwi-global');
+    const stub = _kiwiStateEnv.KIWI_STATE.get(id);
+    const payload = { action, ...data };
+    const res = await stub.fetch('https://kiwi-state.internal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (error) {
+    console.error('KiwiState call failed:', error.message);
+    return { error: `State call failed: ${error.message}` };
+  }
+}
+
+async function getOrCreateUser(env, userId, firstName, lastName, username) {
+  if (_kiwiStateEnv === null) setKiwiStateEnv(env);
+  const result = await callKiwiState('getOrCreateUser', { userId, firstName, lastName, username });
+  if (result && result.user) {
+    return result.user;
+  }
+  console.warn(`getOrCreateUser failed for ${userId}: ${JSON.stringify(result)}`);
+  return {
+    telegramUserId: userId,
+    username: username || '',
+    firstName: firstName || '',
+    lastName: lastName || '',
+    eligibility: ELIGIBILITY.NOT_ELIGIBLE,
+    referralToken: null,
+    referrerId: null,
+    referralCount: 0,
+    groupId: null,
+    createdAt: new Date().toISOString(),
+    lastActiveAt: new Date().toISOString(),
+  };
+}
+
+async function getUserReferralCount(userId) {
+  const result = await callKiwiState('getReferralCount', { userId });
+  return result.referralCount || 0;
+}
+
+async function processReferralStart(env, userId, referralToken, firstName, lastName, username) {
+  const result = await callKiwiState('processReferral', { referralToken, referredUserId: userId, firstName, lastName, username });
+  return result;
+}
+
+async function getAccessConfig() {
+  const result = await callKiwiState('getConfig', {});
+  return result;
+}
+
+async function verifyGroupMembership(userId, groupId) {
+  const result = await callKiwiState('verifyGroupMembership', { userId, groupId });
+  return result;
+}
 
 function isRootAdmin(userId) {
   return userId === ROOT_ADMIN_ID;
@@ -296,14 +371,26 @@ async function cleanupQuiz(chatId, session) {
   }
 }
 
-async function sendStartMenu(chatId, userName) {
+async function sendStartMenu(chatId, userName, eligibility = ELIGIBILITY.NOT_ELIGIBLE) {
+  let eligibilityMsg = '';
+  if (eligibility === ELIGIBILITY.GROUP_VERIFIED) {
+    eligibilityMsg = `\n\n✅ You are fully verified and eligible to participate in quizzes.`;
+  } else if (eligibility === ELIGIBILITY.ELIGIBLE) {
+    eligibilityMsg = `\n\n⏳ You're eligible. Join the group and verify with /verify.`;
+  } else if (eligibility === ELIGIBILITY.GROUP_PENDING) {
+    eligibilityMsg = `\n\n⏳ You've joined the group. Verify with /verify.`;
+  } else {
+    eligibilityMsg = `\n\n⚠️ You're not yet eligible. Get a referral from a current member.`;
+  }
+
   await sendMessage(chatId,
-    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/startquiz — Host: start a quiz\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n\nHost: /startquiz [question_count] [timer_seconds]\nExample: /startquiz 10 30`,
+    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.${eligibilityMsg}\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/startquiz — Host: start a quiz\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n/join — Get group invite link\n/verify — Verify group membership\n/referrals — Check your referral count\n\nHost: /startquiz [question_count] [timer_seconds]\nExample: /startquiz 10 30`,
     {
       reply_markup: {
         keyboard: [
           [{ text: '🧠 Start Quiz' }, { text: '📊 My Score' }],
-          [{ text: '🏆 Leaderboard' }, { text: '📖 Help' }]
+          [{ text: '🏆 Leaderboard' }, { text: '📖 Help' }],
+          [{ text: '👥 Join Group' }, { text: '✅ Verify' }]
         ],
         resize_keyboard: true
       }
@@ -315,7 +402,7 @@ async function sendHelp(chatId) {
   await sendMessage(chatId,
     `<b>📚 Kiwi Quiz Bot — Help</b>\n\n` +
     `<b>CEO / Host Commands:</b>\n` +
-    `/startquiz [count] [timer] — Start a quiz (host+)\n` +
+    `/startquiz [count] [timer] — Start a quiz (host+, must be group-verified)\n` +
     `/quiz [count] [timer] — Alias for /startquiz\n` +
     `/stopquiz — End the quiz (host+)\n` +
     `/next — Advance to next question (host+)\n` +
@@ -326,11 +413,16 @@ async function sendHelp(chatId) {
     `/hosts — List authorized hosts (host+)\n` +
     `/verify [user_id] — Approve a participant (host+)\n` +
     `/addhost [user_id] — Add a host (CEO only)\n` +
-    `/removehost [user_id] — Remove a host (CEO only)\n\n` +
+    `/removehost [user_id] — Remove a host (CEO only)\n` +
+    `/config [key] [value] — Configure gatekeeper (CEO only)\n` +
+    `/stats — Show access statistics (CEO only)\n\n` +
     `<b>Participant Commands:</b>\n` +
     `/score — View your score\n` +
     `/leaderboard — View top performers\n` +
-    `/scores — Alias for /leaderboard\n\n` +
+    `/scores — Alias for /leaderboard\n` +
+    `/join — Get group invite link\n` +
+    `/verify — Verify group membership\n` +
+    `/referrals — Check your referral count\n\n` +
     `<b>Answering:</b>\n` +
     `During a quiz, simply type your answer in the group chat!\n\n` +
     `<b>CEO:</b> 7224762410 has full authorization.`
@@ -398,16 +490,228 @@ async function sendPending(chatId, userId, displayName, userName) {
   await sendMessage(chatId, msg);
 }
 
-async function handleStartCommand(chatId, userId, firstName, lastName, username) {
-  const role = getUserRole(userId);
+async function handleStartCommand(chatId, userId, firstName, lastName, username, args = [], env, chatType = 'private') {
+  const displayName = formatDisplayName({ first_name: firstName, last_name: lastName, username });
+
+  let referralResult = null;
+  let userRecord = null;
+  let eligibility = ELIGIBILITY.NOT_ELIGIBLE;
+
+  try {
+    const referralToken = args[0] && args[0].startsWith('ref_') ? args[0] : null;
+    if (referralToken) {
+      const token = referralToken.replace(/^ref_/, '');
+      referralResult = await processReferralStart(env, userId, token, firstName, lastName, username);
+    }
+
+    userRecord = await getOrCreateUser(env, userId, firstName, lastName, username);
+    eligibility = userRecord?.eligibility || ELIGIBILITY.NOT_ELIGIBLE;
+  } catch (error) {
+    console.error('⚠️ Gatekeeper state access failed, using fallback:', error.message);
+  }
+
   if (isRootAdmin(userId)) {
     console.log(`ROOT ADMIN AUTHORIZED | userId=${userId}`);
   }
-  const displayName = formatDisplayName({ first_name: firstName, last_name: lastName, username });
-  await sendStartMenu(chatId, displayName);
+
+  if (chatType === 'private') {
+    if (referralResult && referralResult.success) {
+      await sendMessage(chatId,
+        `🎁 <b>Referral credited!</b>\n\n` +
+        `You've been referred by ${referralResult.referrerName || 'a friend'}.\n` +
+        `Your account is now <b>eligible</b> for quiz access.\n\n` +
+        `Next step: Join the group and verify your membership.`
+      );
+    } else if (referralResult && referralResult.error) {
+      await sendMessage(chatId,
+        `⚠️ <b>Referral notice</b>\n\n` +
+        `${referralResult.error}\n` +
+        `You can still join the group and verify to participate.`
+      );
+    }
+
+    if (eligibility === ELIGIBILITY.NOT_ELIGIBLE) {
+      const config = await getAccessConfigSafe();
+      const referralToken = userRecord?.referralToken;
+      const referralLink = referralToken ? `https://t.me/${BOT_USERNAME}?start=ref_${referralToken}` : 'Unavailable';
+      await sendMessage(chatId,
+        `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\n` +
+        `To participate in quizzes, you need to:\n\n` +
+        `1️⃣ Get a <b>referral</b> from a current member\n` +
+        `2️⃣ Join our group: ${config.groupInviteLink || 'https://t.me/kiwi_quiz_group'}\n` +
+        `3️⃣ Verify your membership with /verify\n\n` +
+        `Your personal referral link:\n<code>${referralLink}</code>\n\n` +
+        `Share this link to invite friends! Each successful referral earns you a credit.`
+      );
+      return;
+    }
+
+    if (eligibility === ELIGIBILITY.ELIGIBLE) {
+      const config = await getAccessConfigSafe();
+      await sendMessage(chatId,
+        `✅ <b>You're eligible!</b>\n\n` +
+        `You can now join the quiz group and verify your membership.\n\n` +
+        `Group: ${config.groupInviteLink || 'https://t.me/kiwi_quiz_group'}\n\n` +
+        `After joining, type /verify to confirm your membership.`
+      );
+      return;
+    }
+
+    if (eligibility === ELIGIBILITY.GROUP_PENDING) {
+      const config = await getAccessConfigSafe();
+      await sendMessage(chatId,
+        `⏳ <b>Nearly there!</b>\n\n` +
+        `You've joined the group. Please verify your membership with /verify.\n\n` +
+        `If you haven't joined yet:\n${config.groupInviteLink || 'https://t.me/kiwi_quiz_group'}`
+      );
+      return;
+    }
+
+    if (eligibility === ELIGIBILITY.GROUP_VERIFIED) {
+      await sendMessage(chatId,
+        `🎉 <b>You're fully verified!</b>\n\n` +
+        `You can now participate in any active quiz.\n` +
+        `Go answer some questions! 🧠`
+      );
+      return;
+    }
+  }
+
+  await sendStartMenu(chatId, displayName, eligibility);
 }
 
-async function handleQuizCommand(chatId, userId, firstName, lastName, username, args, ctx) {
+async function getAccessConfigSafe() {
+  try {
+    const result = await callKiwiState('getConfig', {});
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return result;
+  } catch (error) {
+    console.error('getConfig fallback:', error.message);
+    return {
+      groupId: null,
+      groupInviteLink: 'https://t.me/kiwi_quiz_group',
+      requiredReferrals: 2,
+      groupVerification: true,
+    };
+  }
+}
+
+async function handleVerifyMembership(chatId, userId, env) {
+  const config = await getAccessConfigSafe();
+  const groupId = config.groupId;
+
+  if (!groupId) {
+    await sendMessage(chatId, `⚠️ Group configuration not set. Contact the admin.`);
+    return;
+  }
+
+  const result = await verifyGroupMembership(userId, groupId);
+
+  if (result.success && result.isMember) {
+    const referralCount = await getUserReferralCount(userId);
+    await sendMessage(chatId,
+      `✅ <b>Group membership verified!</b>\n\n` +
+      `You are now fully eligible to participate in quizzes.\n\n` +
+      `Your referral count: ${referralCount}\n` +
+      `Good luck in the next quiz! 🍀`
+    );
+  } else {
+    await sendMessage(chatId,
+      `⚠️ <b>Verification failed.</b>\n\n` +
+      `You must join the group first:\n${config.groupInviteLink || 'https://t.me/kiwi_quiz_group'}\n\n` +
+      `After joining, try /verify again.`
+    );
+  }
+}
+
+async function handleJoinCommand(chatId, userId, env) {
+  const config = await getAccessConfigSafe();
+  const inviteLink = config.groupInviteLink || 'https://t.me/kiwi_quiz_group';
+  await sendMessage(chatId,
+    `👥 <b>Join our quiz group!</b>\n\n` +
+    `Click the link below to join:\n${inviteLink}\n\n` +
+    `After joining, type /verify to confirm your membership and complete the onboarding.`
+  );
+}
+
+async function handleReferralsCommand(chatId, userId, env) {
+  let count = 0;
+  let referralLink = 'Unavailable';
+  try {
+    count = await getUserReferralCount(userId);
+    const userRecord = await getOrCreateUser(env, userId, 'Referral', '', '');
+    const token = userRecord?.referralToken;
+    if (token) referralLink = `https://t.me/${BOT_USERNAME}?start=ref_${token}`;
+  } catch (error) {
+    console.error('Referrals command error:', error.message);
+  }
+  await sendMessage(chatId,
+    `🏆 <b>Your Referrals</b>\n\n` +
+    `Total successful referrals: ${count}\n\n` +
+    `Your referral link:\n<code>${referralLink}</code>\n\n` +
+    `Each successful referral earns you a credit toward quiz access!`
+  );
+}
+
+async function handleStatsCommand(chatId, userId, env) {
+  if (!isRootAdmin(userId)) {
+    await sendMessage(chatId, `❌ You are not authorized.`);
+    return;
+  }
+  const stats = await callKiwiState('getAccessStats', {});
+  let msg = `<b>📊 Access Statistics</b>\n\n`;
+  msg += `Total users: ${stats.total || 0}\n`;
+  msg += `Eligible users: ${stats.eligible || 0}\n`;
+  msg += `Group verified: ${stats.groupVerified || 0}\n`;
+  msg += `Pending referrals: ${stats.pendingReferrals || 0}\n`;
+  msg += `Successful referrals: ${stats.validReferrals || 0}\n`;
+  await sendMessage(chatId, msg);
+}
+
+async function handleConfigCommand(chatId, userId, args, env) {
+  if (!isRootAdmin(userId)) {
+    await sendMessage(chatId, `❌ You are not authorized.`);
+    return;
+  }
+
+  const key = args[0];
+  const value = args.slice(1).join(' ');
+
+  if (!key) {
+    const config = await getAccessConfigSafe();
+    let msg = `<b>⚙️ Access Configuration</b>\n\n`;
+    msg += `Group ID: ${config.groupId || 'Not set'}\n`;
+    msg += `Invite Link: ${config.groupInviteLink || 'Not set'}\n`;
+    msg += `Referral Required: ${config.referralRequired ? 'Yes' : 'No'}\n`;
+    msg += `Group Verification: ${config.groupVerification ? 'Yes' : 'No'}\n`;
+    msg += `\nUsage: /config [key] [value]\nKeys: groupId, groupInviteLink, referralRequired, groupVerification`;
+    await sendMessage(chatId, msg);
+    return;
+  }
+
+  if (!value) {
+    await sendMessage(chatId, `Usage: /config [key] [value]\n\nSet a configuration value.`);
+    return;
+  }
+
+  try {
+    const existing = await getAccessConfigSafe();
+    const updated = { ...existing, [key]: value };
+    const setResult = await callKiwiState('setConfig', { config: updated });
+    if (setResult.success) {
+      await sendMessage(chatId, `✅ Configuration updated: ${key} = ${value}`);
+    } else {
+      await sendMessage(chatId, `❌ Failed to update configuration: ${setResult.error || 'Unknown error'}`);
+    }
+  } catch (error) {
+    console.error('Config update error:', error.message);
+    await sendMessage(chatId, `❌ Error updating configuration.`);
+  }
+}
+
+async function handleQuizCommand(chatId, userId, firstName, lastName, username, args, ctx, env) {
   const role = getUserRole(userId);
   if (!isAuthorizedHost(userId)) {
     console.log(`UNAUTHORIZED ADMIN ATTEMPT | userId=${userId} command=/quiz`);
@@ -418,6 +722,19 @@ async function handleQuizCommand(chatId, userId, firstName, lastName, username, 
       return;
     }
     await sendMessage(chatId, `⚠️ ${displayName}, only authorized hosts can start a quiz.`);
+    return;
+  }
+
+  let eligibility = ELIGIBILITY.NOT_ELIGIBLE;
+  try {
+    const userRecord = await getOrCreateUser(env, userId, firstName, lastName, username);
+    eligibility = userRecord?.eligibility || ELIGIBILITY.NOT_ELIGIBLE;
+  } catch (error) {
+    console.error('Quiz command gatekeeper error:', error.message);
+  }
+
+  if (eligibility !== ELIGIBILITY.GROUP_VERIFIED) {
+    await sendMessage(chatId, `⚠️ You must be group-verified to start a quiz.\nUse /join to get the invite link and /verify after joining.`);
     return;
   }
 
@@ -709,7 +1026,7 @@ async function handleResetQuizCommand(chatId, userId) {
   await sendMessage(chatId, `🔄 <b>Quiz session reset.</b>\n\nAll quiz data cleared. Use /quiz to start fresh.`);
 }
 
-async function handleAnswerSubmission(chatId, userId, firstName, lastName, username, text) {
+async function handleAnswerSubmission(chatId, userId, firstName, lastName, username, text, env) {
   const session = quizSessions.get(chatId);
   if (!session || session.state !== QUIZ_STATE.ACTIVE) return;
 
@@ -717,16 +1034,31 @@ async function handleAnswerSubmission(chatId, userId, firstName, lastName, usern
 
   if (role === ROLE.HOST || role === ROLE.OWNER || role === ROLE.ROOT) return;
 
+  let eligibility = ELIGIBILITY.NOT_ELIGIBLE;
+  try {
+    const userRecord = await getOrCreateUser(env, userId, firstName, lastName, username);
+    eligibility = userRecord?.eligibility || ELIGIBILITY.NOT_ELIGIBLE;
+  } catch (error) {
+    console.error('Answer submission gatekeeper error:', error.message);
+  }
+
+  if (eligibility !== ELIGIBILITY.GROUP_VERIFIED) {
+    await sendMessage(chatId,
+      `⚠️ ${formatDisplayName({ first_name: firstName, last_name: lastName, username })}, you must complete the verification process to participate.\n\n` +
+      `Get a referral, join the group, and verify with /verify in private chat.`
+    );
+    return;
+  }
+
   if (role === null) {
     if (!participantRecords.has(userId)) {
       participantRecords.set(userId, {
         telegramUserId: userId,
         username: username,
         displayName: formatDisplayName({ first_name: firstName, last_name: lastName, username }),
-        verificationStatus: VERIFICATION_STATUS.PENDING,
-        verificationSource: 'chat_join',
-        quizId: session.quizId,
-        eligible: false,
+        verificationStatus: VERIFICATION_STATUS.VERIFIED,
+        verificationSource: 'group_verified',
+        eligible: true,
         joinedAt: Date.now(),
       });
 
@@ -735,9 +1067,8 @@ async function handleAnswerSubmission(chatId, userId, firstName, lastName, usern
       }
 
       await sendMessage(chatId,
-        `📝 ${formatDisplayName({ first_name: firstName, last_name: lastName, username })}, to participate you must be verified first.\n\n` +
-        `Please send /verify_request in a private message to the host, or your host will verify you with /verify [user_id].\n\n` +
-        `You've been registered as a pending participant.`
+        `✅ ${formatDisplayName({ first_name: firstName, last_name: lastName, username })}, you are verified and can participate!\n\n` +
+        `Type your answer for the current question.`
       );
       return;
     }
@@ -753,7 +1084,7 @@ async function handleAnswerSubmission(chatId, userId, firstName, lastName, usern
   await handleAnswer(chatId, userId, formatDisplayName({ first_name: firstName, last_name: lastName, username }), username, text);
 }
 
-async function handleMessage(message, ctx) {
+async function handleMessage(message, ctx, env) {
   const chatId = message.chat.id;
   const userId = message.from.id;
   const firstName = message.from.first_name;
@@ -772,7 +1103,7 @@ async function handleMessage(message, ctx) {
 
     switch (command) {
       case 'start':
-        await handleStartCommand(chatId, userId, firstName, lastName, username);
+        await handleStartCommand(chatId, userId, firstName, lastName, username, args, env, chatType);
         break;
       case 'help':
         await sendHelp(chatId);
@@ -812,7 +1143,7 @@ async function handleMessage(message, ctx) {
           await sendMessage(chatId, `⚠️ A quiz is already running.`);
           return;
         }
-        await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx);
+        await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx, env);
         break;
       case 'stopquiz':
         await handleEndQuizCommand(chatId, userId);
@@ -823,9 +1154,24 @@ async function handleMessage(message, ctx) {
       case 'resumequiz':
         await handleResumeCommand(chatId, userId);
         break;
-      case 'status':
-        await handleStatusCommand(chatId, userId);
-        break;
+       case 'status':
+         await handleStatusCommand(chatId, userId);
+         break;
+       case 'join':
+         await handleJoinCommand(chatId, userId, env);
+         break;
+       case 'verify':
+         await handleVerifyMembership(chatId, userId, env);
+         break;
+       case 'referrals':
+         await handleReferralsCommand(chatId, userId, env);
+         break;
+       case 'stats':
+         await handleStatsCommand(chatId, userId, env);
+         break;
+       case 'config':
+         await handleConfigCommand(chatId, userId, args, env);
+         break;
       case 'scores':
         await sendLeaderboard(chatId);
         break;
@@ -841,15 +1187,19 @@ async function handleMessage(message, ctx) {
     return;
   }
 
-  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help')) {
+  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help') || text.startsWith('👥 Join Group') || text.startsWith('✅ Verify')) {
     if (text.startsWith('🧠 Start Quiz')) {
-      await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx);
+      await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx, env);
     } else if (text.startsWith('📊 My Score')) {
       await sendScore(chatId, userId, formatDisplayName({ first_name: firstName, last_name: lastName, username }));
     } else if (text.startsWith('🏆 Leaderboard')) {
       await sendLeaderboard(chatId);
     } else if (text.startsWith('📖 Help')) {
       await sendHelp(chatId);
+    } else if (text.startsWith('👥 Join Group')) {
+      await handleJoinCommand(chatId, userId, env);
+    } else if (text.startsWith('✅ Verify')) {
+      await handleVerifyMembership(chatId, userId, env);
     }
     return;
   }
@@ -857,12 +1207,12 @@ async function handleMessage(message, ctx) {
   if (session && session.state === QUIZ_STATE.ACTIVE && session.questionStartTime) {
     const elapsed = Date.now() - session.questionStartTime;
     if (elapsed < session.timerSeconds * 1000) {
-      await handleAnswerSubmission(chatId, userId, firstName, lastName, username, text);
+      await handleAnswerSubmission(chatId, userId, firstName, lastName, username, text, env);
     }
   }
 }
 
-async function handleCallbackQuery(callback, ctx) {
+async function handleCallbackQuery(callback, ctx, env) {
   const callbackId = callback.id;
   const userId = callback.from.id;
   const firstName = callback.from.first_name;
@@ -876,7 +1226,7 @@ async function handleCallbackQuery(callback, ctx) {
 
   switch (data) {
     case 'menu_start':
-      await handleStartCommand(chatId, userId, firstName, lastName, username);
+      await handleStartCommand(chatId, userId, firstName, lastName, username, [], env, 'private');
       break;
     case 'menu_score':
       await sendScore(chatId, userId, displayName);
@@ -890,6 +1240,8 @@ async function handleCallbackQuery(callback, ctx) {
   }
 }
 
+export { KiwiState } from './kiwi-state.js';
+
 export default {
   async fetch(request, env, ctx) {
     if (!TELEGRAM_API) {
@@ -898,6 +1250,7 @@ export default {
         // ROOT_ADMIN_ID is set from env if available (wrangler.toml var)
       }
     }
+    setKiwiStateEnv(env);
 
     if (request.method === 'GET') {
       return new Response('✅ Kiwi Bot is running!', { status: 200 });
@@ -907,11 +1260,19 @@ export default {
       const update = await request.json();
 
       if (update.message) {
-        await handleMessage(update.message, ctx);
+        try {
+          await handleMessage(update.message, ctx, env);
+        } catch (error) {
+          console.error('❌ Error in handleMessage:', error);
+        }
       }
 
       if (update.callback_query) {
-        await handleCallbackQuery(update.callback_query, ctx);
+        try {
+          await handleCallbackQuery(update.callback_query, ctx, env);
+        } catch (error) {
+          console.error('❌ Error in handleCallbackQuery:', error);
+        }
       }
 
       return new Response('OK', { status: 200 });
