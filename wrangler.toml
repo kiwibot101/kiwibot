@@ -5,9 +5,6 @@ compatibility_date = "2026-08-07"
 [vars]
 ROOT_ADMIN_ID = "7224762410"
 
-[triggers]
-crons = ["*/1 * * * *"]
-
 [[durable_objects.bindings]]
 name = "KIWI_STATE"
 class_name = "KiwiState"
