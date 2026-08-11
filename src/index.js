@@ -162,6 +162,18 @@ async function unbanChatMember(chatId, userId) {
   return tgMethod('unbanChatMember', { chat_id: chatId, user_id: userId });
 }
 
+async function pinChatMessage(chatId, messageId) {
+  return tgMethod('pinChatMessage', { chat_id: chatId, message_id: messageId, disable_notification: true });
+}
+
+async function unpinChatMessage(chatId, messageId) {
+  return tgMethod('unpinChatMessage', { chat_id: chatId, message_id: messageId });
+}
+
+async function unpinAllChatMessages(chatId) {
+  return tgMethod('unpinAllChatMessages', { chat_id: chatId });
+}
+
 async function banUser(chatId, userId, deleteMessages = true) {
   return tgMethod('banChatMember', { chat_id: chatId, user_id: userId, delete_message: deleteMessages });
 }
@@ -184,6 +196,7 @@ function createQuizSession(chatId, hostId, questionCount, timerSeconds) {
     scores: new Map(),
     questionStartTime: null,
     questionMessageId: null,
+    pinnableMessageId: null,
     timerId: null,
     isFirstCorrect: new Set(),
     createdAt: Date.now(),
@@ -215,6 +228,12 @@ async function publishQuestion(chatId, session) {
   if (sent.message_id) {
     session.questionMessageId = sent.message_id;
   }
+
+  if (session.pinnableMessageId) {
+    try { await unpinChatMessage(chatId, session.pinnableMessageId); } catch { /* ignore */ }
+  }
+
+  try { await pinChatMessage(chatId, sent.message_id); session.pinnableMessageId = sent.message_id; } catch { /* ignore - no pin permission */ }
 
   if (session.timerId) clearTimeout(session.timerId);
   session.timerId = setTimeout(() => {
@@ -361,6 +380,14 @@ async function cleanupQuiz(chatId, session) {
     }
   }
 
+  if (session.pinnableMessageId) {
+    try {
+      await unpinChatMessage(chatId, session.pinnableMessageId);
+    } catch (e) {
+      /* ignore pin errors */
+    }
+  }
+
   quizSessions.delete(chatId);
 
   if (errors.length > 0) {
@@ -415,7 +442,9 @@ async function sendHelp(chatId) {
     `/addhost [user_id] — Add a host (CEO only)\n` +
     `/removehost [user_id] — Remove a host (CEO only)\n` +
     `/config [key] [value] — Configure gatekeeper (CEO only)\n` +
-    `/stats — Show access statistics (CEO only)\n\n` +
+    `/stats — Show access statistics (CEO only)\n` +
+    `/schedule HH:MM [count] [timer] — Schedule a quiz (host+)\n` +
+    `/scheduled — List scheduled quizzes (host+)\n\n` +
     `<b>Participant Commands:</b>\n` +
     `/score — View your score\n` +
     `/leaderboard — View top performers\n` +
@@ -1084,6 +1113,89 @@ async function handleAnswerSubmission(chatId, userId, firstName, lastName, usern
   await handleAnswer(chatId, userId, formatDisplayName({ first_name: firstName, last_name: lastName, username }), username, text);
 }
 
+async function handleScheduleCommand(chatId, userId, args, env) {
+  if (!isAuthorizedHost(userId)) {
+    await sendMessage(chatId, `❌ Only hosts can schedule quizzes.`);
+    return;
+  }
+
+  if (args.length < 1) {
+    await sendMessage(chatId, `📅 Usage: /schedule HH:MM [question_count] [timer_seconds]\n\nExample: /schedule 14:30 10 15\n\nSchedules a quiz to start automatically at the given time.`);
+    return;
+  }
+
+  const timeStr = args[0];
+  const timeParts = timeStr.split(':');
+  if (timeParts.length !== 2) {
+    await sendMessage(chatId, `❌ Invalid time format. Use HH:MM (24-hour format).`);
+    return;
+  }
+
+  const hours = parseInt(timeParts[0]);
+  const minutes = parseInt(timeParts[1]);
+  if (isNaN(hours) || isNaN(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    await sendMessage(chatId, `❌ Invalid time. Use HH:MM (24-hour format).`);
+    return;
+  }
+
+  const now = new Date();
+  const scheduledTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0);
+  if (scheduledTime.getTime() <= now.getTime()) {
+    scheduledTime.setDate(scheduledTime.getDate() + 1);
+  }
+
+  const questionCount = parseInt(args[1]) || DEFAULT_QUESTION_COUNT;
+  const timerSeconds = parseInt(args[2]) || DEFAULT_TIMER;
+
+  const result = await callKiwiState('scheduleQuiz', {
+    chatId,
+    hostId: userId,
+    questionCount,
+    timerSeconds,
+    scheduledTime: scheduledTime.toISOString(),
+  });
+
+  if (result.success) {
+    await sendMessage(chatId,
+      `📅 <b>Quiz scheduled!</b>\n\n` +
+      `Time: ${scheduledTime.toLocaleString()}\n` +
+      `Questions: ${questionCount}\n` +
+      `Timer: ${timerSeconds}s per question\n\n` +
+      `The quiz will start automatically. You can list scheduled quizzes with /scheduled.`
+    );
+  } else {
+    await sendMessage(chatId, `❌ Failed to schedule quiz: ${result.error || 'Unknown error'}`);
+  }
+}
+
+async function handleScheduledCommand(chatId, userId, env) {
+  if (!isAuthorizedHost(userId)) {
+    await sendMessage(chatId, `❌ Only hosts can view scheduled quizzes.`);
+    return;
+  }
+
+  const result = await callKiwiState('listScheduledQuizzes', {});
+  if (result.error) {
+    await sendMessage(chatId, `❌ Failed to list scheduled quizzes: ${result.error}`);
+    return;
+  }
+
+  const schedules = result.schedules || [];
+  if (schedules.length === 0) {
+    await sendMessage(chatId, `📅 No scheduled quizzes. Use /schedule HH:MM to schedule one.`);
+    return;
+  }
+
+  let msg = `📅 <b>Scheduled Quizzes</b>\n\n`;
+  for (const s of schedules) {
+    const scheduled = new Date(s.scheduledTime);
+    msg += `🆔 ${s.scheduleId.substring(8)}\n`;
+    msg += `⏰ ${scheduled.toLocaleString()}\n`;
+    msg += `❓ ${s.questionCount} questions | ⏱️ ${s.timerSeconds}s\n\n`;
+  }
+  await sendMessage(chatId, msg);
+}
+
 async function handleMessage(message, ctx, env) {
   const chatId = message.chat.id;
   const userId = message.from.id;
@@ -1178,10 +1290,16 @@ async function handleMessage(message, ctx, env) {
       case 'resetquiz':
         await handleResetQuizCommand(chatId, userId);
         break;
-      case 'hosts':
-        await handleHostsCommand(chatId, userId);
-        break;
-      default:
+       case 'hosts':
+         await handleHostsCommand(chatId, userId);
+         break;
+       case 'schedule':
+         await handleScheduleCommand(chatId, userId, args, env);
+         break;
+       case 'scheduled':
+         await handleScheduledCommand(chatId, userId, env);
+         break;
+       default:
         await sendMessage(chatId, `❓ Unknown command. Try /help`);
     }
     return;
@@ -1279,6 +1397,34 @@ export default {
     } catch (error) {
       console.error('❌ Error:', error);
       return new Response('Error', { status: 500 });
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    setKiwiStateEnv(env);
+    console.log(`📅 CRON triggered: ${new Date().toISOString()}`);
+
+    try {
+      const result = await callKiwiState('getDueQuizzes', {});
+      if (result.error) {
+        console.error('Failed to get due quizzes:', result.error);
+        return;
+      }
+
+      const dueQuizzes = result.due || [];
+      for (const quiz of dueQuizzes) {
+        try {
+          await sendMessage(quiz.chatId,
+            `🚀 <b>Scheduled quiz starting now!</b>\n\n${quiz.questionCount} questions | ⏱️ ${quiz.timerSeconds}s per question\n\nParticipants: please wait for questions.`
+          );
+          const session = createQuizSession(quiz.chatId, quiz.hostId, quiz.questionCount, quiz.timerSeconds);
+          await publishQuestion(quiz.chatId, session);
+        } catch (error) {
+          console.error(`Failed to start scheduled quiz ${quiz.scheduleId}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error('Scheduled handler error:', error.message);
     }
   }
 };

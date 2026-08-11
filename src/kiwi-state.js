@@ -77,6 +77,14 @@ export class KiwiState {
         return this.getQuizState(body.chatId);
       case 'deleteQuizState':
         return this.deleteQuizState(body.chatId);
+      case 'scheduleQuiz':
+        return this.scheduleQuiz(body);
+      case 'listScheduledQuizzes':
+        return this.listScheduledQuizzes();
+      case 'getDueQuizzes':
+        return this.getDueQuizzes();
+      case 'removeScheduledQuiz':
+        return this.removeScheduledQuiz(body.scheduleId);
       default:
         return { error: `Unknown action: ${action}` };
     }
@@ -288,6 +296,51 @@ export class KiwiState {
 
   async deleteQuizState(chatId) {
     await this.storage.delete(`quiz:${chatId}`);
+    return { success: true };
+  }
+
+  async scheduleQuiz({ chatId, hostId, questionCount, timerSeconds, scheduledTime }) {
+    const scheduleId = `schedule:${chatId}:${Date.now()}`;
+    const entry = {
+      scheduleId,
+      chatId,
+      hostId,
+      questionCount,
+      timerSeconds,
+      scheduledTime,
+      createdAt: new Date().toISOString(),
+    };
+    await this.storage.put(scheduleId, entry);
+    return { success: true, schedule: entry };
+  }
+
+  async listScheduledQuizzes() {
+    const result = await this.storage.list({ prefix: 'schedule:' });
+    const schedules = Object.values(result.value || result)
+      .filter(s => new Date(s.scheduledTime).getTime() > Date.now())
+      .sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
+    return { schedules };
+  }
+
+  async getDueQuizzes() {
+    const now = Date.now();
+    const result = await this.storage.list({ prefix: 'schedule:' });
+    const due = [];
+    const toRemove = [];
+    for (const [key, entry] of Object.entries(result.value || result)) {
+      if (new Date(entry.scheduledTime).getTime() <= now) {
+        due.push(entry);
+        toRemove.push(key);
+      }
+    }
+    for (const key of toRemove) {
+      await this.storage.delete(key);
+    }
+    return { due };
+  }
+
+  async removeScheduledQuiz(scheduleId) {
+    await this.storage.delete(scheduleId);
     return { success: true };
   }
 }
