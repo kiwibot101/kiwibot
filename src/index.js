@@ -398,7 +398,11 @@ async function cleanupQuiz(chatId, session) {
   }
 }
 
-async function sendStartMenu(chatId, userName, eligibility = ELIGIBILITY.NOT_ELIGIBLE) {
+async function sendStartMenu(chatId, userName, userId, eligibility = ELIGIBILITY.NOT_ELIGIBLE) {
+  const displayName = formatDisplayName({ first_name: userName, last_name: '', username: '' });
+  const role = getUserRole(userId);
+  const isHost = role === ROLE.ROOT || role === ROLE.HOST;
+
   let eligibilityMsg = '';
   if (eligibility === ELIGIBILITY.GROUP_VERIFIED) {
     eligibilityMsg = `\n\n✅ You are fully verified and eligible to participate in quizzes.`;
@@ -410,52 +414,94 @@ async function sendStartMenu(chatId, userName, eligibility = ELIGIBILITY.NOT_ELI
     eligibilityMsg = `\n\n⚠️ You're not yet eligible. Get a referral from a current member.`;
   }
 
+  let keyboard;
+  if (isHost) {
+    keyboard = {
+      keyboard: [
+        [{ text: '🧠 Start Quiz' }, { text: '📅 Schedule' }],
+        [{ text: '⏸️ Pause' }, { text: '▶️ Resume' }, { text: '🛑 End Quiz' }],
+        [{ text: '📊 My Score' }, { text: '📈 Status' }],
+        [{ text: '🏆 Leaderboard' }, { text: '📖 Help' }],
+        [{ text: '👥 Join Group' }, { text: '✅ Verify' }]
+      ],
+      resize_keyboard: true
+    };
+  } else {
+    keyboard = {
+      keyboard: [
+        [{ text: '📊 My Score' }, { text: '🏆 Leaderboard' }],
+        [{ text: 'ℹ️ How to Play' }, { text: '📖 Help' }],
+        [{ text: '👥 Join Group' }, { text: '✅ Verify' }]
+      ],
+      resize_keyboard: true
+    };
+  }
+
   await sendMessage(chatId,
-    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.${eligibilityMsg}\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/startquiz — Host: start a quiz\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n/join — Get group invite link\n/verify — Verify group membership\n/referrals — Check your referral count\n\nHost: /startquiz [question_count] [timer_seconds]\nExample: /startquiz 10 30`,
-    {
-      reply_markup: {
-        keyboard: [
-          [{ text: '🧠 Start Quiz' }, { text: '📊 My Score' }],
-          [{ text: '🏆 Leaderboard' }, { text: '📖 Help' }],
-          [{ text: '👥 Join Group' }, { text: '✅ Verify' }]
-        ],
-        resize_keyboard: true
-      }
-    }
+    `👋 <b>Welcome to Kiwi Quiz Bot!</b>\n\nI'll help you learn through live interactive quizzes.${eligibilityMsg}\n\n📋 <b>Available Commands:</b>\n/start — Show this menu\n/score — Check your score\n/leaderboard — See top performers\n/help — Show help\n/join — Get group invite link\n/verify — Verify group membership\n/referrals — Check your referral count\n\n${isHost ? `🧠 Start Quiz — Host: start a quiz\n⏸️ Pause — Host: pause the quiz\n▶️ Resume — Host: resume the quiz\n🛑 End Quiz — Host: end the quiz\n📅 Schedule — Host: schedule a quiz\n📈 Status — Host: show quiz status\n\nHost: /startquiz [question_count] [timer_seconds]\nExample: /startquiz 10 30` : `During a quiz, simply type your answer in the group chat!`}`,
+    { reply_markup: keyboard }
   );
 }
 
-async function sendHelp(chatId) {
-  await sendMessage(chatId,
-    `<b>📚 Kiwi Quiz Bot — Help</b>\n\n` +
-    `<b>CEO / Host Commands:</b>\n` +
-    `/startquiz [count] [timer] — Start a quiz (host+, must be group-verified)\n` +
-    `/quiz [count] [timer] — Alias for /startquiz\n` +
-    `/stopquiz — End the quiz (host+)\n` +
-    `/next — Advance to next question (host+)\n` +
-    `/pausequiz — Pause timer (host+)\n` +
-    `/resumequiz — Resume timer (host+)\n` +
-    `/status — Show quiz status (host+)\n` +
-    `/resetquiz — Reset quiz session (CEO only)\n` +
-    `/hosts — List authorized hosts (host+)\n` +
-    `/verify [user_id] — Approve a participant (host+)\n` +
-    `/addhost [user_id] — Add a host (CEO only)\n` +
-    `/removehost [user_id] — Remove a host (CEO only)\n` +
-    `/config [key] [value] — Configure gatekeeper (CEO only)\n` +
-    `/stats — Show access statistics (CEO only)\n` +
-    `/schedule HH:MM [count] [timer] — Schedule a quiz (host+)\n` +
-    `/scheduled — List scheduled quizzes (host+)\n\n` +
-    `<b>Participant Commands:</b>\n` +
-    `/score — View your score\n` +
-    `/leaderboard — View top performers\n` +
-    `/scores — Alias for /leaderboard\n` +
-    `/join — Get group invite link\n` +
-    `/verify — Verify group membership\n` +
-    `/referrals — Check your referral count\n\n` +
-    `<b>Answering:</b>\n` +
-    `During a quiz, simply type your answer in the group chat!\n\n` +
-    `<b>CEO:</b> 7224762410 has full authorization.`
-  );
+async function sendHelp(chatId, userId = null) {
+  const role = userId !== null ? getUserRole(userId) : null;
+  const isHost = role === ROLE.ROOT || role === ROLE.HOST;
+
+  if (isHost) {
+    await sendMessage(chatId,
+      `<b>📚 Kiwi Quiz Bot — Host Help</b>\n\n` +
+      `<b>Quiz Controls:</b>\n` +
+      `/startquiz [count] [timer] — Start a quiz (host+, must be group-verified)\n` +
+      `/quiz [count] [timer] — Alias for /startquiz\n` +
+      `/stopquiz — End the quiz (host+)\n` +
+      `/next — Advance to next question (host+)\n` +
+      `/pausequiz — Pause timer (host+)\n` +
+      `/resumequiz — Resume timer (host+)\n` +
+      `/status — Show quiz status (host+)\n` +
+      `/schedule HH:MM [count] [timer] — Schedule a quiz (host+)\n` +
+      `/scheduled — List scheduled quizzes (host+)\n\n` +
+      `<b>Admin Controls:</b>\n` +
+      `/resetquiz — Reset quiz session (CEO only)\n` +
+      `/hosts — List authorized hosts (host+)\n` +
+      `/verify [user_id] — Approve a participant (host+)\n` +
+      `/addhost [user_id] — Add a host (CEO only)\n` +
+      `/removehost [user_id] — Remove a host (CEO only)\n` +
+      `/config [key] [value] — Configure gatekeeper (CEO only)\n` +
+      `/stats — Show access statistics (CEO only)\n\n` +
+      `<b>Participant Commands:</b>\n` +
+      `/score — View your score\n` +
+      `/leaderboard — View top performers\n` +
+      `/scores — Alias for /leaderboard\n` +
+      `/join — Get group invite link\n` +
+      `/verify — Verify group membership\n` +
+      `/referrals — Check your referral count\n\n` +
+      `<b>Answering:</b>\n` +
+      `During a quiz, simply type your answer in the group chat!\n\n` +
+      `<b>CEO:</b> 7224762410 has full authorization.`
+    );
+  } else {
+    await sendMessage(chatId,
+      `<b>📚 Kiwi Quiz Bot — How to Play</b>\n\n` +
+      `<b>Participation:</b>\n` +
+      `1️⃣ Get referred by a current member to get a referral credit\n` +
+      `2️⃣ Join the quiz group via /join\n` +
+      `3️⃣ Verify your membership with /verify\n` +
+      `4️⃣ Once verified, you can answer quiz questions\n\n` +
+      `<b>Your Commands:</b>\n` +
+      `/score — View your score\n` +
+      `/leaderboard — See top performers\n` +
+      `/scores — Alias for /leaderboard\n` +
+      `/join — Get group invite link\n` +
+      `/verify — Verify group membership\n` +
+      `/referrals — Check your referral count\n` +
+      `/help — Show this help\n\n` +
+      `<b>During a quiz:</b>\n` +
+      `Simply type your answer in the group chat!\n` +
+      `A timer counts down for each question.\n` +
+      `Results are shown after each question.\n\n` +
+      `<b>Note:</b> Only authorized hosts can start and control quizzes.`
+    );
+  }
 }
 
 async function sendLeaderboard(chatId) {
@@ -606,7 +652,7 @@ async function handleStartCommand(chatId, userId, firstName, lastName, username,
     }
   }
 
-  await sendStartMenu(chatId, displayName, eligibility);
+  await sendStartMenu(chatId, displayName, userId, eligibility);
 }
 
 async function getAccessConfigSafe() {
@@ -1217,8 +1263,8 @@ async function handleMessage(message, ctx, env) {
       case 'start':
         await handleStartCommand(chatId, userId, firstName, lastName, username, args, env, chatType);
         break;
-      case 'help':
-        await sendHelp(chatId);
+       case 'help':
+         await sendHelp(chatId, userId);
         break;
       case 'quiz':
         await handleQuizCommand(chatId, userId, firstName, lastName, username, args, ctx);
@@ -1306,19 +1352,29 @@ async function handleMessage(message, ctx, env) {
     return;
   }
 
-  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help') || text.startsWith('👥 Join Group') || text.startsWith('✅ Verify')) {
+  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help') || text.startsWith('ℹ️ How to Play') || text.startsWith('👥 Join Group') || text.startsWith('✅ Verify') || text.startsWith('📅 Schedule') || text.startsWith('⏸️ Pause') || text.startsWith('▶️ Resume') || text.startsWith('🛑 End Quiz') || text.startsWith('📈 Status')) {
     if (text.startsWith('🧠 Start Quiz')) {
       await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx, env);
     } else if (text.startsWith('📊 My Score')) {
       await sendScore(chatId, userId, formatDisplayName({ first_name: firstName, last_name: lastName, username }));
     } else if (text.startsWith('🏆 Leaderboard')) {
       await sendLeaderboard(chatId);
-    } else if (text.startsWith('📖 Help')) {
-      await sendHelp(chatId);
+    } else if (text.startsWith('📖 Help') || text.startsWith('ℹ️ How to Play')) {
+      await sendHelp(chatId, userId);
     } else if (text.startsWith('👥 Join Group')) {
       await handleJoinCommand(chatId, userId, env);
     } else if (text.startsWith('✅ Verify')) {
       await handleVerifyMembership(chatId, userId, env);
+    } else if (text.startsWith('📅 Schedule')) {
+      await handleScheduledCommand(chatId, userId, env);
+    } else if (text.startsWith('⏸️ Pause')) {
+      await handlePauseCommand(chatId, userId);
+    } else if (text.startsWith('▶️ Resume')) {
+      await handleResumeCommand(chatId, userId);
+    } else if (text.startsWith('🛑 End Quiz')) {
+      await handleEndQuizCommand(chatId, userId);
+    } else if (text.startsWith('📈 Status')) {
+      await handleStatusCommand(chatId, userId);
     }
     return;
   }
@@ -1354,7 +1410,7 @@ async function handleCallbackQuery(callback, ctx, env) {
       await sendLeaderboard(chatId);
       break;
     case 'menu_help':
-      await sendHelp(chatId);
+      await sendHelp(chatId, userId);
       break;
   }
 }
