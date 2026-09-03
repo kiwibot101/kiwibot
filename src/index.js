@@ -101,7 +101,7 @@ function isAuthorizedHost(userId) {
 
 function getUserRole(userId) {
   if (isRootAdmin(userId)) return ROLE.ROOT;
-  if (hosts.has(userId)) return ROLE.HOST;
+  if (hosts.has(userId) || hosts.has(Number(userId))) return ROLE.HOST;
   const record = participantRecords.get(userId);
   if (record && record.verificationStatus === VERIFICATION_STATUS.VERIFIED) return ROLE.PARTICIPANT;
   return null;
@@ -400,8 +400,46 @@ async function cleanupQuiz(chatId, session) {
 
 async function sendStartMenu(chatId, userName, userId, eligibility = ELIGIBILITY.NOT_ELIGIBLE) {
   const displayName = formatDisplayName({ first_name: userName, last_name: '', username: '' });
+  const isRoot = isRootAdmin(userId);
   const role = getUserRole(userId);
-  const isHost = role === ROLE.ROOT || role === ROLE.HOST;
+  const isHost = isRoot || role === ROLE.ROOT || role === ROLE.HOST;
+
+  if (isRoot) {
+    const config = await getAccessConfigSafe();
+    const groupStatus = config.groupId
+      ? `✅ <b>Quiz Group ID:</b> <code>${config.groupId}</code>`
+      : `⚠️ <b>Quiz Group ID:</b> <i>Not configured!</i> (Set via: <code>/config groupId &lt;id&gt;</code>)`;
+    const linkStatus = config.groupInviteLink && config.groupInviteLink !== 'https://t.me/kiwi_quiz_group'
+      ? `🔗 <b>Group Invite Link:</b> ${config.groupInviteLink}`
+      : `⚠️ <b>Group Invite Link:</b> <i>Not configured!</i> (Set via: <code>/config groupInviteLink &lt;url&gt;</code>)`;
+
+    const keyboard = {
+      keyboard: [
+        [{ text: '🧠 Start Quiz' }, { text: '📅 Schedule' }],
+        [{ text: '⏸️ Pause' }, { text: '▶️ Resume' }, { text: '🛑 End Quiz' }],
+        [{ text: '⚙️ Config' }, { text: '📊 Stats' }, { text: '👥 Hosts' }],
+        [{ text: '🏆 Leaderboard' }, { text: '📖 Help' }]
+      ],
+      resize_keyboard: true
+    };
+
+    await sendMessage(chatId,
+      `👑 <b>Welcome, CEO / Owner!</b> (ID: <code>${userId}</code>)\n\n` +
+      `You have full administrative authority over Kiwi Quiz Bot.\n\n` +
+      `📌 <b>Current Setup Status:</b>\n${groupStatus}\n${linkStatus}\n\n` +
+      `🛠️ <b>Quick Admin Commands:</b>\n` +
+      `• <code>/config</code> — View all settings\n` +
+      `• <code>/config groupId &lt;chat_id&gt;</code> — Link your Telegram group\n` +
+      `• <code>/config groupInviteLink &lt;link&gt;</code> — Set valid invite link\n` +
+      `• <code>/config referralRequired false</code> — Allow all group members to play\n` +
+      `• <code>/startquiz [count] [timer]</code> — Start live quiz\n` +
+      `• <code>/addhost [user_id]</code> — Authorize a co-host\n` +
+      `• <code>/stats</code> — View participant metrics\n` +
+      `• <code>/help</code> — Full command reference`,
+      { reply_markup: keyboard }
+    );
+    return;
+  }
 
   let eligibilityMsg = '';
   if (eligibility === ELIGIBILITY.GROUP_VERIFIED) {
@@ -589,6 +627,16 @@ async function handleStartCommand(chatId, userId, firstName, lastName, username,
     console.log(`ROOT ADMIN AUTHORIZED | userId=${userId}`);
   }
 
+  // ROOT ADMIN and AUTHORIZED HOSTS automatically bypass referral gating
+  if (isRootAdmin(userId) || isAuthorizedHost(userId)) {
+    eligibility = ELIGIBILITY.GROUP_VERIFIED;
+    try {
+      await callKiwiState('updateUserField', { userId, field: 'eligibility', value: ELIGIBILITY.GROUP_VERIFIED });
+    } catch (_) {}
+    await sendStartMenu(chatId, displayName, userId, eligibility);
+    return;
+  }
+
   if (chatType === 'private') {
     if (referralResult && referralResult.success) {
       await sendMessage(chatId,
@@ -674,6 +722,19 @@ async function getAccessConfigSafe() {
 }
 
 async function handleVerifyMembership(chatId, userId, env) {
+  if (isRootAdmin(userId)) {
+    const config = await getAccessConfigSafe();
+    let groupNote = config.groupId 
+      ? `✅ Group ID is set to: <code>${config.groupId}</code>` 
+      : `⚠️ <b>Quiz Group ID is not yet configured!</b>\nAs the CEO, set it with: <code>/config groupId &lt;your_group_id&gt;</code>`;
+    await sendMessage(chatId,
+      `👑 <b>CEO Verification Status: Fully Verified</b>\n\n` +
+      `You are the system administrator and have full privileges to host quizzes and manage settings.\n\n` +
+      `${groupNote}`
+    );
+    return;
+  }
+
   const config = await getAccessConfigSafe();
   const groupId = config.groupId;
 
@@ -703,6 +764,16 @@ async function handleVerifyMembership(chatId, userId, env) {
 
 async function handleJoinCommand(chatId, userId, env) {
   const config = await getAccessConfigSafe();
+  if (isRootAdmin(userId) && (!config.groupInviteLink || config.groupInviteLink === 'https://t.me/kiwi_quiz_group')) {
+    await sendMessage(chatId,
+      `⚠️ <b>Group Invite Link Not Configured!</b>\n\n` +
+      `As the CEO, please set your group invite link with:\n` +
+      `<code>/config groupInviteLink https://t.me/YourGroupLink</code>\n\n` +
+      `And set your group ID with:\n` +
+      `<code>/config groupId -100XXXXXXXXXX</code>`
+    );
+    return;
+  }
   const inviteLink = config.groupInviteLink || 'https://t.me/kiwi_quiz_group';
   await sendMessage(chatId,
     `👥 <b>Join our quiz group!</b>\n\n` +
@@ -757,26 +828,35 @@ async function handleConfigCommand(chatId, userId, args, env) {
   if (!key) {
     const config = await getAccessConfigSafe();
     let msg = `<b>⚙️ Access Configuration</b>\n\n`;
-    msg += `Group ID: ${config.groupId || 'Not set'}\n`;
-    msg += `Invite Link: ${config.groupInviteLink || 'Not set'}\n`;
-    msg += `Referral Required: ${config.referralRequired ? 'Yes' : 'No'}\n`;
-    msg += `Group Verification: ${config.groupVerification ? 'Yes' : 'No'}\n`;
-    msg += `\nUsage: /config [key] [value]\nKeys: groupId, groupInviteLink, referralRequired, groupVerification`;
+    msg += `<b>groupId:</b> <code>${config.groupId || 'Not set'}</code>\n`;
+    msg += `<b>groupInviteLink:</b> ${config.groupInviteLink || 'Not set'}\n`;
+    msg += `<b>referralRequired:</b> ${config.referralRequired ? 'Yes (referrals enforced)' : 'No (open to all group members)'}\n`;
+    msg += `<b>groupVerification:</b> ${config.groupVerification ? 'Yes' : 'No'}\n`;
+    msg += `\n<b>Usage:</b> /config [key] [value]\n`;
+    msg += `• <code>/config groupId -100XXXXXXXXXX</code>\n`;
+    msg += `• <code>/config groupInviteLink https://t.me/YourLink</code>\n`;
+    msg += `• <code>/config referralRequired false</code>\n`;
+    msg += `• <code>/config groupVerification false</code>`;
     await sendMessage(chatId, msg);
     return;
   }
 
   if (!value) {
-    await sendMessage(chatId, `Usage: /config [key] [value]\n\nSet a configuration value.`);
+    await sendMessage(chatId, `Usage: /config [key] [value]\n\nExamples:\n/config groupId -1001234567890\n/config groupInviteLink https://t.me/YourGroup\n/config referralRequired false`);
     return;
   }
 
   try {
+    let parsedValue = value;
+    if (value.toLowerCase() === 'true') parsedValue = true;
+    if (value.toLowerCase() === 'false') parsedValue = false;
+    if (key === 'groupId') parsedValue = String(value).trim();
+
     const existing = await getAccessConfigSafe();
-    const updated = { ...existing, [key]: value };
+    const updated = { ...existing, [key]: parsedValue };
     const setResult = await callKiwiState('setConfig', { config: updated });
     if (setResult.success) {
-      await sendMessage(chatId, `✅ Configuration updated: ${key} = ${value}`);
+      await sendMessage(chatId, `✅ <b>Configuration updated:</b>\n<code>${key}</code> = <code>${parsedValue}</code>`);
     } else {
       await sendMessage(chatId, `❌ Failed to update configuration: ${setResult.error || 'Unknown error'}`);
     }
@@ -808,7 +888,7 @@ async function handleQuizCommand(chatId, userId, firstName, lastName, username, 
     console.error('Quiz command gatekeeper error:', error.message);
   }
 
-  if (eligibility !== ELIGIBILITY.GROUP_VERIFIED) {
+  if (!isRootAdmin(userId) && eligibility !== ELIGIBILITY.GROUP_VERIFIED) {
     await sendMessage(chatId, `⚠️ You must be group-verified to start a quiz.\nUse /join to get the invite link and /verify after joining.`);
     return;
   }
@@ -1352,9 +1432,15 @@ async function handleMessage(message, ctx, env) {
     return;
   }
 
-  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help') || text.startsWith('ℹ️ How to Play') || text.startsWith('👥 Join Group') || text.startsWith('✅ Verify') || text.startsWith('📅 Schedule') || text.startsWith('⏸️ Pause') || text.startsWith('▶️ Resume') || text.startsWith('🛑 End Quiz') || text.startsWith('📈 Status')) {
+  if (text.startsWith('🧠 Start Quiz') || text.startsWith('📊 My Score') || text.startsWith('🏆 Leaderboard') || text.startsWith('📖 Help') || text.startsWith('ℹ️ How to Play') || text.startsWith('👥 Join Group') || text.startsWith('✅ Verify') || text.startsWith('📅 Schedule') || text.startsWith('⏸️ Pause') || text.startsWith('▶️ Resume') || text.startsWith('🛑 End Quiz') || text.startsWith('📈 Status') || text.startsWith('⚙️ Config') || text.startsWith('📊 Stats') || text.startsWith('👥 Hosts')) {
     if (text.startsWith('🧠 Start Quiz')) {
       await handleQuizCommand(chatId, userId, firstName, lastName, username, [], ctx, env);
+    } else if (text.startsWith('⚙️ Config')) {
+      await handleConfigCommand(chatId, userId, [], env);
+    } else if (text.startsWith('📊 Stats')) {
+      await handleStatsCommand(chatId, userId, env);
+    } else if (text.startsWith('👥 Hosts')) {
+      await handleHostsCommand(chatId, userId);
     } else if (text.startsWith('📊 My Score')) {
       await sendScore(chatId, userId, formatDisplayName({ first_name: firstName, last_name: lastName, username }));
     } else if (text.startsWith('🏆 Leaderboard')) {
