@@ -1,7 +1,7 @@
 import { QUIZ_QUESTIONS, QUESTION_COUNT } from './questions.js';
 import { KiwiState, ELIGIBILITY, REFERRAL_STATUS } from './kiwi-state.js';
 
-const ROOT_ADMIN_ID = 7224762410;
+let ROOT_ADMIN_ID = 7224762410;
 let TELEGRAM_API;
 const BOT_USERNAME = 'kiwi010_bot';
 const DEFAULT_TIMER = 15;
@@ -91,12 +91,12 @@ async function verifyGroupMembership(userId, groupId) {
 }
 
 function isRootAdmin(userId) {
-  return userId === ROOT_ADMIN_ID;
+  return Number(userId) === Number(ROOT_ADMIN_ID);
 }
 
 function isAuthorizedHost(userId) {
   if (isRootAdmin(userId)) return true;
-  return hosts.has(userId);
+  return hosts.has(userId) || hosts.has(Number(userId));
 }
 
 function getUserRole(userId) {
@@ -477,7 +477,7 @@ async function sendHelp(chatId, userId = null) {
       `/referrals — Check your referral count\n\n` +
       `<b>Answering:</b>\n` +
       `During a quiz, simply type your answer in the group chat!\n\n` +
-      `<b>CEO:</b> 7224762410 has full authorization.`
+      `<b>CEO:</b> ${ROOT_ADMIN_ID} has full authorization.`
     );
   } else {
     await sendMessage(chatId,
@@ -1421,8 +1421,13 @@ export default {
   async fetch(request, env, ctx) {
     if (!TELEGRAM_API) {
       TELEGRAM_API = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
-      if (env.ROOT_ADMIN_ID) {
-        // ROOT_ADMIN_ID is set from env if available (wrangler.toml var)
+    }
+    if (env.ROOT_ADMIN_ID) {
+      const parsedRoot = parseInt(env.ROOT_ADMIN_ID, 10);
+      if (!isNaN(parsedRoot) && parsedRoot !== ROOT_ADMIN_ID) {
+        hosts.delete(ROOT_ADMIN_ID);
+        ROOT_ADMIN_ID = parsedRoot;
+        hosts.add(ROOT_ADMIN_ID);
       }
     }
     setKiwiStateEnv(env);
